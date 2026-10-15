@@ -1,8 +1,11 @@
-
+# maxOS
 .DS_Store
 ._*
 __MACOSX/
+# python
 __pycache__/
+*.pyc
 *.py[cod]
 .venv/
 venv/
+.vscode
