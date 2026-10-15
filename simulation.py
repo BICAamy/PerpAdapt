@@ -1,124 +1,201 @@
+"""Generate reproducible PerpAdapt simulation datasets.
+
+The fixed base angles are specified in degrees and converted exactly once to
+radians.  Optional noise is added only to the measured world translations;
+quaternions and clean ground-truth labels remain unchanged.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import numpy as np
-import scipy.spatial.transform as st
-from scipy.spatial.transform import Rotation as R
-
-class Config:
-    data_num=10000
-    n_samples=100
-    alpha_base = [0,90,-90]  
-    beta_base = [0,45,-45]  
-    tx_min=0
-    tx_max=1
-    ty_min=0
-    ty_max=1
-    tz_min=0
-    tz_max=1
-    rmin_min=0.6
-    rmin_max=1
-    rmaj_min=0
-    rmaj_max=0.2
-config=Config()
-
-def matrix_to_quaternion(matrix):
-    rotation = st.Rotation.from_matrix(matrix)
-    return rotation.as_quat()  
-
-def gram_schmidt(vectors):
-    rotation = R.from_matrix(vectors.T)
-    vectors = rotation.as_matrix().T
-    return vectors
+from scipy.spatial.transform import Rotation
 
 
-data = [] 
-label = [] 
-
-for _ in range(config.data_num):
-
-    tx = np.random.uniform(config.tx_min, config.tx_max)
-    ty = np.random.uniform(config.ty_min, config.ty_max)
-    tz = np.random.uniform(config.tz_min, config.tz_max)
-    rmin = np.random.uniform(config.rmin_min, config.rmin_max)
-    rmaj = np.random.uniform(config.rmaj_min, config.rmaj_max)
-
-    def g(alpha, beta):
-        A = np.array([[1, 0, 0],
-                      [0, np.cos(alpha), -np.sin(alpha)],
-                      [0, np.sin(alpha), np.cos(alpha)]], dtype=np.float64)
-        B = np.array([[np.cos(beta), 0, np.sin(beta)],
-                      [0, 1, 0],
-                      [-np.sin(beta), 0, np.cos(beta)]], dtype=np.float64)
-        p = np.array([tx, ty, rmin + tz], dtype=np.float64)
-        q = np.array([0, 0, rmaj], dtype=np.float64)
-        R2 = A @ B
-        t = R2 @ p + A @ q
-        return R2, t
+ALPHA_BASE_DEG = np.array([0.0, 90.0, -90.0], dtype=np.float64)
+BETA_BASE_DEG = np.array([0.0, 45.0, -45.0], dtype=np.float64)
 
 
-    R1 = np.random.randn(3, 3)
-    R1 = gram_schmidt(R1).T.astype(np.float64)
-
-    def generate_circles():
-        alpha_circles_R = []
-        alpha_circles_t = []
-        beta_circles_R = []
-        beta_circles_t = []
-        alphas = np.linspace(0, 2 * np.pi, config.n_samples, dtype=np.float64)
-        betas = np.linspace(0, 2 * np.pi, config.n_samples, dtype=np.float64)
-
-        for alpha in config.alpha_base:
-            alpha_circle_R = []
-            alpha_circle_t = []
-            for beta in betas:
-                R2, t = g(alpha, beta)
-                alpha_circle_R.append(R2 @ R1)
-                alpha_circle_t.append(t)
-            alpha_circles_R.append(alpha_circle_R)
-            alpha_circles_t.append(alpha_circle_t)
-
-        for beta in config.beta_base:
-            beta_circle_R = []
-            beta_circle_t = []
-            for alpha in alphas:
-                R2, t = g(alpha, beta)
-                beta_circle_R.append(R2 @ R1)
-                beta_circle_t.append(t)
-            beta_circles_R.append(beta_circle_R)
-            beta_circles_t.append(beta_circle_t)
-
-        return np.array(alpha_circles_R, dtype=np.float64), np.array(alpha_circles_t, dtype=np.float64), np.array(
-            beta_circles_R, dtype=np.float64), np.array(beta_circles_t, dtype=np.float64)
-    alpha_circles_R, alpha_circles_t, beta_circles_R, beta_circles_t = generate_circles()
+def rotation_x(angle):
+    cosine, sine = np.cos(angle), np.sin(angle)
+    return np.array(
+        [[1.0, 0.0, 0.0], [0.0, cosine, -sine], [0.0, sine, cosine]],
+        dtype=np.float64,
+    )
 
 
-    data_i = []
-    for alpha_index in range(len(config.alpha_base)):
-        for i in range(config.n_samples):
-            rotation = matrix_to_quaternion(alpha_circles_R[alpha_index, i, :, :]) 
-            translation = alpha_circles_t[alpha_index, i, :].reshape(-1)
-            data_alpha = np.concatenate([rotation, translation]) 
-            data_i.append(data_alpha)
-    for beta_index in range(len(config.beta_base)):
-        for i in range(config.n_samples):
-            rotation = matrix_to_quaternion(beta_circles_R[beta_index, i, :, :])
-            translation = beta_circles_t[beta_index, i, :].reshape(-1)
-            data_beta = np.concatenate([rotation, translation]) 
-            data_i.append(data_beta)
-    data.append(data_i)
+def rotation_y(angle):
+    cosine, sine = np.cos(angle), np.sin(angle)
+    return np.array(
+        [[cosine, 0.0, sine], [0.0, 1.0, 0.0], [-sine, 0.0, cosine]],
+        dtype=np.float64,
+    )
 
-    T = np.eye(4, 4, dtype=np.float64)
-    T[:3, :3] = alpha_circles_R[0, 0, :, :]
-    T[:3, 3] = alpha_circles_t[0, 0, :]
-    T = np.linalg.inv(T).astype(np.float64)
-    t = T @ np.array([0, 0, rmaj, 1], dtype=np.float64)
-    label.append(t[:-1])
 
-data = np.array(data, dtype=np.float64)
-label = np.array(label, dtype=np.float64)
+def generate_dataset(
+    instances=1000,
+    samples_per_circle=100,
+    seed=20261015,
+    noise_std=0.0,
+    noise_seed=20261016,
+):
+    """Generate arrays compatible with the original ``dataset.npz`` layout.
 
-np.savez('dataset.npz', alpha_R=data[:,:300,:4], alpha_t=data[:,:300,4:], beta_R=data[:,300:,:4], beta_t=data[:,300:,4:], t=label)
-dataset=np.load('dataset.npz')
-print(dataset['alpha_R'].shape)
-print(dataset['alpha_t'].shape)
-print(dataset['beta_R'].shape)
-print(dataset['beta_t'].shape)
-print(dataset['t'].shape)
+    The coordinate unit is metres.  For example, ``noise_std=0.001`` means
+    independent 1 mm standard-deviation Gaussian noise in every translation
+    component of every pose.
+    """
+    if instances < 1:
+        raise ValueError("instances must be positive")
+    if samples_per_circle < 3:
+        raise ValueError("samples_per_circle must be at least 3")
+    if noise_std < 0.0:
+        raise ValueError("noise_std cannot be negative")
+
+    data_rng = np.random.default_rng(seed)
+    noise_rng = np.random.default_rng(noise_seed)
+    alpha_base = np.deg2rad(ALPHA_BASE_DEG)
+    beta_base = np.deg2rad(BETA_BASE_DEG)
+    sweep_angles = np.linspace(
+        0.0, 2.0 * np.pi, samples_per_circle, dtype=np.float64
+    )
+
+    alpha_quaternions = np.empty(
+        (instances, 3 * samples_per_circle, 4), dtype=np.float64
+    )
+    alpha_positions = np.empty(
+        (instances, 3 * samples_per_circle, 3), dtype=np.float64
+    )
+    beta_quaternions = np.empty_like(alpha_quaternions)
+    beta_positions = np.empty_like(alpha_positions)
+    labels = np.empty((instances, 3), dtype=np.float64)
+    pivots = np.empty((instances, 3, 3), dtype=np.float64)
+
+    for instance in range(instances):
+        tx, ty, tz = data_rng.uniform(0.0, 1.0, size=3)
+        minor_radius = data_rng.uniform(0.6, 1.0)
+        major_radius = data_rng.uniform(0.0, 0.2)
+        sensor_offset = np.array(
+            [tx, ty, minor_radius + tz], dtype=np.float64
+        )
+        arm_offset = np.array([0.0, 0.0, major_radius], dtype=np.float64)
+        sensor_mount_rotation = Rotation.random(random_state=data_rng).as_matrix()
+
+        alpha_matrices = []
+        alpha_points = []
+        for alpha in alpha_base:
+            rotation_alpha = rotation_x(alpha)
+            for beta in sweep_angles:
+                moving_rotation = rotation_alpha @ rotation_y(beta)
+                alpha_matrices.append(moving_rotation @ sensor_mount_rotation)
+                alpha_points.append(
+                    moving_rotation @ sensor_offset + rotation_alpha @ arm_offset
+                )
+
+        beta_matrices = []
+        beta_points = []
+        for beta in beta_base:
+            rotation_beta = rotation_y(beta)
+            for alpha in sweep_angles:
+                rotation_alpha = rotation_x(alpha)
+                moving_rotation = rotation_alpha @ rotation_beta
+                beta_matrices.append(moving_rotation @ sensor_mount_rotation)
+                beta_points.append(
+                    moving_rotation @ sensor_offset + rotation_alpha @ arm_offset
+                )
+
+        alpha_points = np.asarray(alpha_points, dtype=np.float64)
+        beta_points = np.asarray(beta_points, dtype=np.float64)
+        if noise_std > 0.0:
+            # Keep this per-instance alpha-then-beta order so a fixed noise seed
+            # reproduces the documented experiments exactly.
+            alpha_points = alpha_points + noise_rng.normal(
+                0.0, noise_std, size=alpha_points.shape
+            )
+            beta_points = beta_points + noise_rng.normal(
+                0.0, noise_std, size=beta_points.shape
+            )
+
+        alpha_quaternions[instance] = Rotation.from_matrix(
+            np.asarray(alpha_matrices)
+        ).as_quat()
+        beta_quaternions[instance] = Rotation.from_matrix(
+            np.asarray(beta_matrices)
+        ).as_quat()
+        alpha_positions[instance] = alpha_points
+        beta_positions[instance] = beta_points
+
+        # T_world_sensor = [R2 R1, R2 p + A q].  Therefore the same physical
+        # pivot expressed in the sensor frame is -R1^T p for every pose.
+        labels[instance] = -sensor_mount_rotation.T @ sensor_offset
+        pivots[instance] = np.asarray(
+            [rotation_x(alpha) @ arm_offset for alpha in alpha_base]
+        )
+
+    return {
+        "alpha_R": alpha_quaternions,
+        "alpha_t": alpha_positions,
+        "beta_R": beta_quaternions,
+        "beta_t": beta_positions,
+        "t": labels,
+        "cc": pivots[:, 0],
+        "cc_all": pivots,
+        "samples_per_circle": np.array(samples_per_circle, dtype=np.int64),
+        "alpha_base_deg": ALPHA_BASE_DEG.copy(),
+        "beta_base_deg": BETA_BASE_DEG.copy(),
+        "seed": np.array(seed, dtype=np.int64),
+        "noise_seed": np.array(noise_seed, dtype=np.int64),
+        "noise_std": np.array(noise_std, dtype=np.float64),
+        "position_unit": np.array("m"),
+        "format_version": np.array("perpadapt-sim-v2"),
+    }
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Generate corrected PerpAdapt simulated pose trajectories."
+    )
+    parser.add_argument("--output", default="outputs/sim_clean.npz")
+    parser.add_argument("--instances", type=int, default=1000)
+    parser.add_argument("--samples-per-circle", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=20261015)
+    parser.add_argument(
+        "--noise-std",
+        type=float,
+        default=0.0,
+        help="translation-noise standard deviation in metres (0.001 = 1 mm)",
+    )
+    parser.add_argument("--noise-seed", type=int, default=20261016)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    dataset = generate_dataset(
+        instances=args.instances,
+        samples_per_circle=args.samples_per_circle,
+        seed=args.seed,
+        noise_std=args.noise_std,
+        noise_seed=args.noise_seed,
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(output, **dataset)
+
+    print(f"saved: {output}")
+    print(f"alpha_R: {dataset['alpha_R'].shape}")
+    print(f"alpha_t: {dataset['alpha_t'].shape}")
+    print(f"beta_R:  {dataset['beta_R'].shape}")
+    print(f"beta_t:  {dataset['beta_t'].shape}")
+    print(f"t:       {dataset['t'].shape}")
+    print(
+        "base angles (degrees): "
+        f"alpha={ALPHA_BASE_DEG.tolist()}, beta={BETA_BASE_DEG.tolist()}"
+    )
+    print(f"translation noise std: {args.noise_std:g} m")
+
+
+if __name__ == "__main__":
+    main()

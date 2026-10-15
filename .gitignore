@@ -1,11 +1,15 @@
-# maxOS
+# macOS
 .DS_Store
 ._*
 __MACOSX/
-# python
+
+# Python
 __pycache__/
 *.pyc
 *.py[cod]
 .venv/
 venv/
-.vscode
+.vscode/
+
+# Locally generated datasets and metric files
+outputs/

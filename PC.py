@@ -1,230 +1,294 @@
-import numpy as np
-from scipy.optimize import minimize
-import sympy as sp
-from sklearn.metrics import mean_absolute_error,mean_squared_error,r2_score
+"""Corrected implementation of Lee et al.'s perpendicular-circle baseline.
+
+PC(4) uses three C-arm-axis circles plus one x-axis circle.  PC(6) uses the
+same three C-arm-axis circles plus three x-axis circles.
+"""
+
+from __future__ import annotations
+
 import time
+
+import numpy as np
+
+from geometry import (
+    align_and_average,
+    closest_point_on_line,
+    fit_circle_3d,
+    fit_circle_with_normal,
+    infer_samples_per_circle,
+    inverse_transform_point,
+    project_point_to_plane,
+    quaternion_to_rotation_matrix,
+    regression_metrics,
+    unit,
+)
+
+
 def project_to_plane(point, plane_point, plane_normal):
-    plane_normal = plane_normal / np.linalg.norm(plane_normal)
-    projected_point = point - (point - plane_point * plane_normal) * plane_normal
-    return projected_point
+    """Compatibility wrapper with the corrected dot-product projection."""
+    return project_point_to_plane(point, plane_point, plane_normal)
+
 
 def point_to_line_distance(point, line_point, line_direction):
-    # line_direction = line_direction / np.linalg.norm(line_direction)
-    projection = np.dot(point - line_point, np.array(line_direction)) * np.array(line_direction)
-    distance_vector = point - line_point - projection
-    distance = np.linalg.norm(distance_vector)
-    return distance
+    closest = closest_point_on_line(point, line_point, line_direction)
+    return float(np.linalg.norm(np.asarray(point) - closest))
 
-def quaternion_to_rotation_matrix(q):
-    x, y, z, w = q
-    rotation_matrix = np.array([
-        [1 - 2 * y ** 2 - 2 * z ** 2, 2 * x * y - 2 * z * w, 2 * x * z + 2 * y * w],
-        [2 * x * y + 2 * z * w, 1 - 2 * x ** 2 - 2 * z ** 2, 2 * y * z - 2 * x * w],
-        [2 * x * z - 2 * y * w, 2 * y * z + 2 * x * w, 1 - 2 * x ** 2 - 2 * y ** 2]
-    ])
-    return rotation_matrix
 
 def getT(rotation, position):
-    temp = np.concatenate((np.array(rotation), np.array(position).reshape(-1, 1)), axis=1)
-    Tmat = np.concatenate((temp, np.array([0, 0, 0, 1]).reshape(1, -1)), axis=0)
-    return Tmat
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = np.asarray(rotation, dtype=np.float64)
+    transform[:3, 3] = np.asarray(position, dtype=np.float64)
+    return transform
 
 
-def normal(cc):
-    x, y, z = cc
-    A = 2 * (x - 0)
-    B = 2 * (y - 0)
-    C = 2 * (z - 0)
+def computecc(nc, cc, C, R=None):
+    """Return the midpoint of line/sphere intersections in homogeneous form.
 
-    length = np.sqrt(A ** 2 + B ** 2 + C ** 2)
-
-    normal_vector = np.array([A, B, C]) / length
-    return normal_vector
-
-
-def computecc(nc, cc, C, R):
-    x, y, z, x0, y0, z0, a, b, c, t, Cx, Cy, Cz, r = sp.symbols('x y z x0 y0 z0 a b c t Cx Cy Cz r')
-
-    x0, y0, z0 = cc  
-    a, b, c = nc  
-    Cx, Cy, Cz = C  
-    r = R  
-
-    x_expr = x0 + a * t
-    y_expr = y0 + b * t
-    z_expr = z0 + c * t
-
-    circle_equation = (x - Cx) ** 2 + (y - Cy) ** 2 + (z - Cz) ** 2 - r ** 2
-
-    equation = circle_equation.subs({x: x_expr, y: y_expr, z: z_expr})
-
-    solutions = sp.solve(equation, t)
-
-    intersection_points = [(x_expr.subs(t, sol), y_expr.subs(t, sol), z_expr.subs(t, sol)) for sol in solutions]
-    intersection_points = np.array(intersection_points)
-    point = np.mean(intersection_points, axis=0)
-
-    return np.append(point, 1)
-
-
-def circle_fit_error(params, data):
-    x0, y0, z0, r = params
-    error = 0
-    for point in data:
-        x, y, z = point
-        error += np.abs((x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2 - r ** 2)
-    return error
+    The midpoint is simply the closest point from sphere center ``C`` to the
+    line ``cc + lambda * nc``; the radius is irrelevant to that midpoint.
+    """
+    point = closest_point_on_line(C, cc, nc)
+    return np.append(point, 1.0)
 
 
 def step1(beta_circles):
-    cx_list = []
-    n_list = []
+    x_centers = []
+    x_normals = []
     for circle in beta_circles:
-        data = np.column_stack((circle[:, 0],
-                                circle[:, 1],
-                                circle[:, 2]))
-        result = minimize(circle_fit_error, x0=(0, 1, 0, 0.5), args=(data,), method='BFGS')
-        x0, y0, z0, r = result.x
-        cx = [x0, y0, z0]
-        cx_list.append(cx)
-        n = normal(cx)
-        n_list.append(n)
-    cx = np.mean(cx_list, axis=0)
-    # print(f"cx:{cx}")
-    n = np.mean(n_list, axis=0)
-    # print(f"n:{n}")
-    return cx, n
+        center, normal, _ = fit_circle_3d(circle)
+        x_centers.append(center)
+        x_normals.append(normal)
+    return np.mean(x_centers, axis=0), align_and_average(x_normals)
 
 
 def step2(cx, n, alpha_circles):
-    cc_list = []
-    nc_list = []
-    rmin_list = []
+    c_centers = []
+    c_normals = []
     for circle in alpha_circles:
-        data = np.column_stack((circle[:, 0],
-                                circle[:, 1],
-                                circle[:, 2]))
-        result = minimize(circle_fit_error, x0=(0, 1, 0, 0.5), args=(data,), method='BFGS')
-        x0, y0, z0, r = result.x
-        cc = [x0, y0, z0]
-        cc_list.append(cc)
-        rmin_list.append(r)
-        nc = normal(cc)
-        nc_list.append(nc)
-    cc = np.mean(cc_list, axis=0)
-    rmin = np.mean(rmin_list, axis=0)
-    # print(rmin_list)
-    # print(f"cc:{cc}")
-    # print(f"rmin:{rmin}")
-    projected_cx = project_to_plane(cx, cc, n)
-    # print(f"projected_cx:{projected_cx}")
-    c = (cc + projected_cx) / 2
-    # print(f"c:{c}")
-    return cc_list, nc_list, c
+        center, normal, _ = fit_circle_3d(circle)
+        c_centers.append(center)
+        c_normals.append(normal)
+    c_centers = np.asarray(c_centers)
+
+    # Lee's construction fits the trajectory of the three minor-circle centers.
+    fitted_center, _ = fit_circle_with_normal(c_centers, n)
+    projected_x_center = project_point_to_plane(cx, fitted_center, n)
+    torus_center = 0.5 * (fitted_center + projected_x_center)
+    return c_centers, np.asarray(c_normals), torus_center
 
 
-def step3(cc_list, nc_list, c, n):
-    r_list = []
-    for (cc, nc) in zip(cc_list, nc_list):
-        r_list.append(point_to_line_distance(c, cc, nc))
-    r = np.mean(r_list)
-    # print(f"r_list:{r_list}")
-    # print(f"rmaj:{r}")
-
-    theta = np.linspace(0, 2 * np.pi, 100)
-    n = n / np.linalg.norm(n)
-    if n[2] == 0:
-        v1 = np.array([0, 0, 1.])
-    else:
-        v1 = np.array([0., 0, -n[0] / n[2]])
-    v1 -= np.dot(v1, n) * n
-    v1 /= np.linalg.norm(v1)
-    v2 = np.cross(n, v1)
-    locus = c + r * (np.outer(np.cos(theta), v1) + np.outer(np.sin(theta), v2))
-    return r
+def step3(cc_list, nc_list, c, n=None):
+    return float(
+        np.mean(
+            [
+                point_to_line_distance(c, circle_center, circle_normal)
+                for circle_center, circle_normal in zip(cc_list, nc_list)
+            ]
+        )
+    )
 
 
-def step4(T, nc_list, cc_list, c, r):
-    t = []
-    for T_eachcircle, nc, cc in zip(T, nc_list, cc_list):
-        cc_point = computecc(nc, cc, c, r)
-        temp = []
-        for T in T_eachcircle:
-            T = np.linalg.inv(T)
-            temp.append(np.matmul(T, cc_point))
-        t.append(temp)
-    t_alpha_0 = np.mean(t[0], axis=0)
-    t_alpha_90 = np.mean(t[1], axis=0)
-    t_alpha_090 = np.mean(t[2], axis=0)
-    t_avg = np.mean((t_alpha_0, t_alpha_90, t_alpha_090), axis=0)
-    # print(f"t_alpha_0:{t_alpha_0}")
-    # print(f"t_alpha_90:{t_alpha_90}")
-    # print(f"t_alpha_090:{t_alpha_090}")
-    # print(f"t_avg:{t_avg}")
-    return [t_alpha_0, t_alpha_90, t_alpha_090, t_avg]
+def step4(transforms, nc_list, cc_list, c, r=None):
+    per_circle = []
+    for circle_transforms, normal, center in zip(transforms, nc_list, cc_list):
+        pivot = closest_point_on_line(c, center, normal)
+        estimates = []
+        for transform in circle_transforms:
+            transform = np.asarray(transform, dtype=np.float64)
+            estimates.append(
+                inverse_transform_point(
+                    transform[:3, :3], transform[:3, 3], pivot
+                )
+            )
+        per_circle.append(np.mean(estimates, axis=0))
+    average = np.mean(per_circle, axis=0)
+    return [np.append(value, 1.0) for value in per_circle] + [np.append(average, 1.0)]
+
+
+def _filter_circle(sac, points, rotations=None):
+    points = np.asarray(points, dtype=np.float64)
+    if sac is None:
+        return points, None if rotations is None else np.asarray(rotations)
+    _, inliers = sac.fit(points)
+    inliers = np.asarray(inliers)
+    if inliers.dtype == bool:
+        inliers = np.flatnonzero(inliers)
+    if len(inliers) < 3:
+        raise ValueError(f"sample consensus retained only {len(inliers)} circle points")
+    filtered_rotations = None if rotations is None else np.asarray(rotations)[inliers]
+    return points[inliers], filtered_rotations
+
+
+def _reshape_circles(array, circle_count, samples_per_circle):
+    array = np.asarray(array)
+    if array.ndim == 4:
+        if array.shape[1] < circle_count:
+            raise ValueError(f"expected at least {circle_count} circles, got {array.shape[1]}")
+        return array[:, :circle_count, :samples_per_circle]
+    if array.ndim != 3:
+        raise ValueError(f"expected flattened or grouped circle data, got {array.shape}")
+    required = circle_count * samples_per_circle
+    if array.shape[1] < required:
+        raise ValueError(f"expected at least {required} samples, got {array.shape[1]}")
+    return array[:, :required].reshape(
+        array.shape[0], circle_count, samples_per_circle, array.shape[2]
+    )
+
 
 class PC:
-    def __init__(self,sac,pc_circle_num):
-        self.sac=sac
-        self.pc_circle_num=pc_circle_num
-    def calibrate(self,dataset):
-        alpha_R=dataset['alpha_R']
-        alpha_t=dataset['alpha_t']
-        beta_R=dataset['beta_R']
-        beta_t=dataset['beta_t']
-        t=dataset['t']
-        t_pred=[]
-        sac_time_cost=[]
-        calibration_time_cost=[]
-        for i in range(t.shape[0]):
-            if self.sac is None:
-                beta_circles=beta_t[i,:,:].reshape(self.pc_circle_num-3,-1,3)
-                alpha_circles=alpha_t[i,:,:].reshape(3,-1,3)
-                rotations=alpha_R[i,:,:].reshape(3,-1,4)
-            else:
-                beta_circles=beta_t[i,:,:].reshape(self.pc_circle_num-3,-1,3).tolist()
-                alpha_circles=alpha_t[i,:,:].reshape(3,-1,3).tolist()
-                rotations=alpha_R[i,:,:].reshape(3,-1,4).tolist()
+    """Lee PC baseline with either four or six total circles."""
 
-                start_time = time.time()
-                for j in range(len(beta_circles)):
-                    beta_circle=np.array(beta_circles[j])
-                    _,inliers=self.sac.fit(beta_circle)
-                    beta_circles[j]=beta_circle[inliers]
-                
-                for j in range(len(alpha_circles)):
-                    alpha_circle=np.array(alpha_circles[j])
-                    _,inliers=self.sac.fit(alpha_circle)
-                    alpha_circles[j]=alpha_circle[inliers]
+    def __init__(self, sac=None, pc_circle_num=4):
+        if pc_circle_num not in (4, 6):
+            raise ValueError("pc_circle_num must be 4 or 6")
+        self.sac = sac
+        self.pc_circle_num = pc_circle_num
 
-                    rotations[j]=np.array(rotations[j])[inliers]
-                end_time = time.time()
-                sac_time_cost.append(end_time-start_time)
-
-            T=[]
-            for j in range(len(rotations)):
-                Tcircle=[]
-                for k in range(len(rotations[j])):
-                    rotation=np.array(quaternion_to_rotation_matrix(rotations[j][k]))
-                    position=alpha_circles[j][k]
-                    Tcircle.append(getT(rotation, position))
-                T.append(Tcircle)
-            
-            start_time = time.time()
-            cx, n = step1(beta_circles)
-            cc_list, nc_list, c = step2(cx, n, alpha_circles)
-            r = step3(cc_list, nc_list, c, n)
-            t_pred.append(step4(T, nc_list, cc_list, c, r)[-1][:-1])
-            end_time = time.time()
-            calibration_time_cost.append(end_time-start_time)
-            
-        t_pred=np.array(t_pred)
-        # print(f"MAE:{mean_absolute_error(t,t_pred)}")
-        print(f"MSE:{mean_squared_error(t,t_pred)}")
-        # print(f"R2:{r2_score(t,t_pred)}")
-        # print(f"sac_time_cost:{np.mean(sac_time_cost)}")
-        # print(f"calibration_time_cost:{np.mean(calibration_time_cost)}")
-        if self.sac is None:
-            print(f"calibration_time_cost:{np.mean(calibration_time_cost)}")
+    def calibrate(self, dataset, *, verbose=True):
+        alpha_positions_raw = np.asarray(dataset["alpha_t"])
+        if alpha_positions_raw.ndim == 4:
+            samples_per_circle = alpha_positions_raw.shape[2]
         else:
-            print(f"all time:{np.mean(sac_time_cost)+np.mean(calibration_time_cost)}")
+            samples_per_circle = infer_samples_per_circle(
+                dataset, alpha_positions_raw.shape[1]
+            )
+
+        x_circle_count = self.pc_circle_num - 3
+        alpha_positions = _reshape_circles(
+            alpha_positions_raw, 3, samples_per_circle
+        )
+        alpha_quaternions = _reshape_circles(
+            dataset["alpha_R"], 3, samples_per_circle
+        )
+        beta_positions = _reshape_circles(
+            dataset["beta_t"], x_circle_count, samples_per_circle
+        )
+        truth = np.asarray(dataset["t"], dtype=np.float64)
+
+        if not (
+            len(alpha_positions)
+            == len(alpha_quaternions)
+            == len(beta_positions)
+            == len(truth)
+        ):
+            raise ValueError("dataset arrays have inconsistent instance counts")
+
+        predictions = []
+        pivots_all = []
+        torus_centers = []
+        torus_normals = []
+        major_radii = []
+        sac_times = []
+        calibration_times = []
+
+        for index in range(len(truth)):
+            sac_start = time.perf_counter()
+            filtered_beta = [
+                _filter_circle(self.sac, circle)[0]
+                for circle in beta_positions[index]
+            ]
+            filtered_alpha = []
+            filtered_quaternions = []
+            for circle, rotations in zip(
+                alpha_positions[index], alpha_quaternions[index]
+            ):
+                points, quaternions = _filter_circle(
+                    self.sac, circle, rotations
+                )
+                filtered_alpha.append(points)
+                filtered_quaternions.append(quaternions)
+            sac_times.append(time.perf_counter() - sac_start if self.sac else 0.0)
+
+            calibration_start = time.perf_counter()
+            x_centers = []
+            x_normals = []
+            for circle in filtered_beta:
+                center, normal, _ = fit_circle_3d(circle)
+                x_centers.append(center)
+                x_normals.append(normal)
+            torus_normal = align_and_average(x_normals)
+            x_center = np.mean(x_centers, axis=0)
+
+            c_centers = []
+            c_normals = []
+            for circle in filtered_alpha:
+                center, normal, _ = fit_circle_3d(circle)
+                c_centers.append(center)
+                c_normals.append(normal)
+            c_centers = np.asarray(c_centers)
+            c_normals = np.asarray(c_normals)
+
+            fitted_center, _ = fit_circle_with_normal(c_centers, torus_normal)
+            projected_x_center = project_point_to_plane(
+                x_center, fitted_center, torus_normal
+            )
+            torus_center = 0.5 * (fitted_center + projected_x_center)
+
+            pivots = np.asarray(
+                [
+                    closest_point_on_line(torus_center, center, normal)
+                    for center, normal in zip(c_centers, c_normals)
+                ]
+            )
+            radii = np.linalg.norm(pivots - torus_center, axis=1)
+
+            local_estimates = []
+            for pivot, quaternions, positions in zip(
+                pivots, filtered_quaternions, filtered_alpha
+            ):
+                for quaternion, position in zip(quaternions, positions):
+                    rotation = quaternion_to_rotation_matrix(quaternion)
+                    local_estimates.append(
+                        inverse_transform_point(rotation, position, pivot)
+                    )
+
+            predictions.append(np.mean(local_estimates, axis=0))
+            pivots_all.append(pivots)
+            torus_centers.append(torus_center)
+            torus_normals.append(torus_normal)
+            major_radii.append(float(np.mean(radii)))
+            calibration_times.append(time.perf_counter() - calibration_start)
+
+        prediction = np.asarray(predictions)
+        pivot_prediction_all = np.asarray(pivots_all)
+        metrics = regression_metrics(truth, prediction)
+        result = {
+            "method": f"Lee({self.pc_circle_num})",
+            "t_pred": prediction,
+            "cc_pred": pivot_prediction_all[:, 0],
+            "cc_all_pred": pivot_prediction_all,
+            "mae": metrics["mae"],
+            "mse": metrics["mse"],
+            "r2": metrics["r2"],
+            "t_l2_mean": metrics["l2_mean"],
+            "sac_time_mean": float(np.mean(sac_times)),
+            "calibration_time_mean": float(np.mean(calibration_times)),
+            "torus_centers": np.asarray(torus_centers),
+            "torus_normals": np.asarray(torus_normals),
+            "major_radii": np.asarray(major_radii),
+        }
+        if "cc" in dataset:
+            cc_truth = np.asarray(dataset["cc"], dtype=np.float64)
+            result["cc_error_mean"] = float(
+                np.mean(np.linalg.norm(result["cc_pred"] - cc_truth, axis=1))
+            )
+        elif "cc_all" in dataset:
+            cc_truth_all = np.asarray(dataset["cc_all"], dtype=np.float64)
+            result["cc_error_mean"] = float(
+                np.mean(
+                    np.linalg.norm(pivot_prediction_all[:, 0] - cc_truth_all[:, 0], axis=1)
+                )
+            )
+            result["cc_all_error_mean"] = float(
+                np.mean(np.linalg.norm(pivot_prediction_all - cc_truth_all, axis=2))
+            )
+
+        if verbose:
+            print(result["method"])
+            print(f"MAE: {result['mae']:.12g}")
+            print(f"MSE: {result['mse']:.12g}")
+            print(f"R2: {result['r2']:.12g}")
+            if "cc_error_mean" in result:
+                print(f"c_c,0 mean error: {result['cc_error_mean']:.12g}")
+            print(f"calibration_time: {result['calibration_time_mean']:.6f} s/instance")
+        return result
