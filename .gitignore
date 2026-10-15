@@ -13,3 +13,5 @@ venv/
 
 # Locally generated datasets and metric files
 outputs/
+
+docs/paper.pdf
