@@ -1,7 +1,7 @@
 # 修正后 PPC 与 Lee PC 的复现说明
 
-本文档对应当前仓库中的 `geometry.py`、`PPC.py`、`PC.py`、
-`simulation.py` 和 `evaluate_corrected.py`。
+本文档对应当前仓库中的 `geometry.py`、`PPC.py`、`PC.py`、`RANSAC.py`、
+`MemorySAC.py`、`PerpAdapt.py`、`simulation.py` 和 `evaluate_corrected.py`。
 
 ## 1. 本次修正了什么
 
@@ -22,6 +22,8 @@
 6. 固定角 `alpha=[0, 90, -90]`、`beta=[0, 45, -45]` 明确按“度”保存，
    在生成器中仅用 `np.deg2rad` 转换一次。每条轨迹内部的 `0..2π` 扫描角本来
    就是弧度，不再转换。
+7. RANSAC 和 MemorySAC 的三点最小模型增加无量纲近似共线判定。退化三点会被
+   丢弃并重抽，不计入有效迭代次数；圆心改为三点所在平面内的解析外心。
 
 ## 2. 六条轨迹与三种方法
 
@@ -157,11 +159,35 @@ c_c,0 error     = mean over k of ||c_hat_c,0,k - c_c,0,k||_2
 `R^2` 分别对 x/y/z 三个输出计算后做等权平均。无噪声结果达到机器精度时，
 `R^2` 显示为 1。
 
-## 8. 回归测试
+## 8. RANSAC / MemorySAC 的三点退化保护
+
+两种共识方法使用同一个三点质量：
+
+```text
+q = ||(p1-p0) x (p2-p0)|| / max(||pi-pj||^2)
+```
+
+默认 `q < 0.01` 的三点被视为近似共线，并重新抽样。`q` 对平移、旋转和整体
+尺度不变，因此换世界坐标系原点或把米改成毫米不会改变判定。可通过命令行设置：
+
+```bash
+python PerpAdapt.py \
+  --dataset outputs/clean_seed20261015.npz \
+  --method PPC \
+  --sac RANSAC \
+  --min-triangle-quality 0.01 \
+  --sac-seed 20261017
+```
+
+将 `--sac RANSAC` 改成 `--sac MemorySAC` 即可选择 MemorySAC；改成
+`--sac None` 则跳过内点筛选。完整参数和三个方法的组合示例见
+[运行命令.md](运行命令.md)。
+
+## 9. 回归测试
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖：无噪声机器精度、固定角单位、仅平移加噪且真值不变，以及不经过世界
-原点的两条旋转轴公共垂线。
+测试覆盖：无噪声机器精度、固定角单位、仅平移加噪且真值不变、不经过世界原点的
+两条旋转轴公共垂线、近似共线三点拒绝与重抽，以及命令行 SAC 选项。

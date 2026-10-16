@@ -9,6 +9,13 @@ from __future__ import annotations
 import numpy as np
 
 
+DEFAULT_MIN_TRIANGLE_QUALITY = 1e-2
+
+
+class DegenerateCircleSample(ValueError):
+    """Raised when three sampled points cannot define a stable circle."""
+
+
 def unit(vector: np.ndarray, *, name: str = "vector") -> np.ndarray:
     """Return a normalized 3-vector and reject degenerate input."""
     vector = np.asarray(vector, dtype=np.float64)
@@ -27,6 +34,141 @@ def _as_points(points: np.ndarray, *, min_points: int = 3) -> np.ndarray:
     if not np.all(np.isfinite(points)):
         raise ValueError("points contain NaN or infinity")
     return points
+
+
+def triangle_quality(points: np.ndarray) -> float:
+    """Return a rigid- and scale-invariant quality score for three points.
+
+    The score is ``||e01 x e02|| / longest_edge^2``.  It is zero for
+    collinear/repeated points and ``sqrt(3)/2`` for an equilateral triangle.
+    Small values therefore identify numerically unstable minimal samples.
+    """
+    points = _as_points(points)
+    if len(points) != 3:
+        raise ValueError(f"triangle quality requires exactly 3 points, got {len(points)}")
+
+    edge01 = points[1] - points[0]
+    edge02 = points[2] - points[0]
+    edge12 = points[2] - points[1]
+    longest_edge_squared = max(
+        float(np.dot(edge01, edge01)),
+        float(np.dot(edge02, edge02)),
+        float(np.dot(edge12, edge12)),
+    )
+    if longest_edge_squared <= np.finfo(np.float64).tiny:
+        return 0.0
+    return float(np.linalg.norm(np.cross(edge01, edge02)) / longest_edge_squared)
+
+
+def circle_from_three_points(
+    points: np.ndarray,
+    *,
+    min_triangle_quality: float = DEFAULT_MIN_TRIANGLE_QUALITY,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Construct the unique 3-D circle through a stable three-point sample.
+
+    Unlike the old unconstrained variance minimization, the circumcenter is
+    solved analytically inside the plane of the three points.
+    """
+    points = _as_points(points)
+    if len(points) != 3:
+        raise ValueError(f"minimal circle fitting requires exactly 3 points, got {len(points)}")
+    if not 0.0 <= min_triangle_quality < 1.0:
+        raise ValueError("min_triangle_quality must be in [0, 1)")
+
+    quality = triangle_quality(points)
+    if quality < min_triangle_quality:
+        raise DegenerateCircleSample(
+            "three-point circle sample is nearly collinear: "
+            f"quality={quality:.6g} < {min_triangle_quality:.6g}"
+        )
+
+    point0, point1, point2 = points
+    edge01 = point1 - point0
+    edge02 = point2 - point0
+    cross = np.cross(edge01, edge02)
+    cross_squared = float(np.dot(cross, cross))
+    if cross_squared <= np.finfo(np.float64).tiny:
+        raise DegenerateCircleSample("three-point circle sample is collinear")
+
+    offset = (
+        np.dot(edge01, edge01) * np.cross(edge02, cross)
+        + np.dot(edge02, edge02) * np.cross(cross, edge01)
+    ) / (2.0 * cross_squared)
+    center = point0 + offset
+    normal = cross / np.sqrt(cross_squared)
+    radius = float(np.linalg.norm(center - point0))
+    if not np.all(np.isfinite(center)) or not np.isfinite(radius):
+        raise DegenerateCircleSample("three-point circle construction is not finite")
+    return center, normal, radius
+
+
+def circle_residuals(model, points: np.ndarray) -> np.ndarray:
+    """Euclidean point-to-circle residuals for a 3-D circle model."""
+    center, normal, radius = model
+    points = _as_points(points, min_points=1)
+    center = np.asarray(center, dtype=np.float64)
+    normal = unit(normal, name="circle normal")
+    delta = points - center
+    signed_plane_distance = delta @ normal
+    projected_delta = delta - np.outer(signed_plane_distance, normal)
+    radial_distance = np.linalg.norm(projected_delta, axis=1)
+    return np.sqrt(
+        signed_plane_distance * signed_plane_distance
+        + (radial_distance - float(radius)) ** 2
+    )
+
+
+def draw_nondegenerate_triplet(
+    points: np.ndarray,
+    rng,
+    *,
+    min_triangle_quality: float = DEFAULT_MIN_TRIANGLE_QUALITY,
+    probabilities: np.ndarray | None = None,
+    max_attempts: int = 1000,
+) -> tuple[np.ndarray, np.ndarray, int, float]:
+    """Sample until a stable three-point circle hypothesis can be formed.
+
+    Returns ``(indices, sampled_points, attempts_used, triangle_quality)``.
+    """
+    points = _as_points(points)
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    if not 0.0 <= min_triangle_quality < 1.0:
+        raise ValueError("min_triangle_quality must be in [0, 1)")
+
+    if probabilities is not None:
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+        if probabilities.shape != (len(points),):
+            raise ValueError("sampling probabilities must have shape (N,)")
+        if not np.all(np.isfinite(probabilities)) or np.any(probabilities < 0.0):
+            raise ValueError("sampling probabilities must be finite and non-negative")
+        total = float(np.sum(probabilities))
+        if total <= 0.0 or np.count_nonzero(probabilities) < 3:
+            probabilities = None
+        else:
+            probabilities = probabilities / total
+
+    for attempt in range(1, max_attempts + 1):
+        indices = rng.choice(len(points), 3, replace=False, p=probabilities)
+        sample = points[indices]
+        quality = triangle_quality(sample)
+        if quality < min_triangle_quality:
+            continue
+        try:
+            # Keep exact/repeated-point rejection active even when callers set
+            # min_triangle_quality=0 to disable only the near-collinear margin.
+            circle_from_three_points(
+                sample, min_triangle_quality=min_triangle_quality
+            )
+        except DegenerateCircleSample:
+            continue
+        return np.asarray(indices), sample, attempt, quality
+
+    raise DegenerateCircleSample(
+        f"failed to draw a stable three-point sample in {max_attempts} attempts "
+        f"(minimum quality {min_triangle_quality:.6g})"
+    )
 
 
 def _plane_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

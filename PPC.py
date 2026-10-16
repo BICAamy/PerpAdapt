@@ -15,6 +15,7 @@ import numpy as np
 from geometry import (
     closest_points_between_lines,
     fit_circle_3d,
+    infer_samples_per_circle,
     inverse_transform_point,
     quaternion_to_rotation_matrix,
     regression_metrics,
@@ -103,12 +104,16 @@ class PPC:
         self.sac = sac
 
     def calibrate(self, dataset, *, verbose=True):
-        samples_per_circle = None
-        if "samples_per_circle" in dataset:
-            samples_per_circle = int(np.asarray(dataset["samples_per_circle"]).item())
+        alpha_positions_raw = np.asarray(dataset["alpha_t"])
+        if alpha_positions_raw.ndim == 4:
+            samples_per_circle = alpha_positions_raw.shape[2]
+        else:
+            samples_per_circle = infer_samples_per_circle(
+                dataset, alpha_positions_raw.shape[1]
+            )
 
         alpha_quaternions = _first_circle(dataset["alpha_R"], samples_per_circle)
-        alpha_positions = _first_circle(dataset["alpha_t"], samples_per_circle)
+        alpha_positions = _first_circle(alpha_positions_raw, samples_per_circle)
         beta_positions = _first_circle(dataset["beta_t"], samples_per_circle)
         truth = np.asarray(dataset["t"], dtype=np.float64)
 
