@@ -8,8 +8,11 @@ from geometry import (
     draw_nondegenerate_triplet,
     triangle_quality,
 )
+from evaluate_corrected import build_parser as build_evaluation_parser
+from evaluate_corrected import evaluate
 from PerpAdapt import build_parser
 from RANSAC import RANSAC
+from simulation import generate_dataset
 
 
 class _ChoiceSequence:
@@ -22,6 +25,15 @@ class _ChoiceSequence:
         self.last_replace = replace
         self.last_probabilities = p
         return self.choices.pop(0)
+
+
+class _AllInlierSAC:
+    def __init__(self):
+        self.fit_calls = 0
+
+    def fit(self, points):
+        self.fit_calls += 1
+        return None, np.arange(len(points), dtype=np.int64)
 
 
 class SampleConsensusTests(unittest.TestCase):
@@ -103,6 +115,42 @@ class SampleConsensusTests(unittest.TestCase):
                 self.assertEqual(
                     parser.parse_args(["--sac", supplied]).sac, normalized
                 )
+
+    def test_evaluation_cli_accepts_requested_sac_names(self):
+        parser = build_evaluation_parser()
+        expected = {
+            "None": "none",
+            "RANSAC": "ransac",
+            "MemorySAC": "memorysac",
+        }
+        for supplied, normalized in expected.items():
+            with self.subTest(supplied=supplied):
+                args = parser.parse_args(
+                    ["--dataset", "data.npz", "--sac", supplied]
+                )
+                self.assertEqual(args.sac, normalized)
+
+    def test_evaluation_applies_selected_sac_to_all_three_methods(self):
+        dataset = generate_dataset(
+            instances=1,
+            samples_per_circle=12,
+            seed=20261015,
+            noise_std=0.0,
+        )
+        samplers = []
+
+        def factory():
+            sampler = _AllInlierSAC()
+            samplers.append(sampler)
+            return sampler
+
+        results = evaluate(dataset, sac_factory=factory)
+        self.assertEqual(
+            [result["method"] for result in results],
+            ["PPC", "Lee(4)", "Lee(6)"],
+        )
+        self.assertEqual(len(samplers), 3)
+        self.assertEqual([sampler.fit_calls for sampler in samplers], [2, 4, 6])
 
 
 if __name__ == "__main__":

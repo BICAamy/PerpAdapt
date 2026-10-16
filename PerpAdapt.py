@@ -23,6 +23,58 @@ def _casefold_choice(value: str) -> str:
     return value.casefold()
 
 
+def add_sac_arguments(parser):
+    """Add the shared None/RANSAC/MemorySAC command-line options."""
+    parser.add_argument(
+        "--sac",
+        type=_casefold_choice,
+        choices=("none", "ransac", "memorysac"),
+        default="none",
+        help="inlier selector: None, RANSAC, or MemorySAC (case-insensitive)",
+    )
+    consensus = parser.add_argument_group("RANSAC / MemorySAC")
+    consensus.add_argument("--num-iterations", type=int, default=10)
+    consensus.add_argument(
+        "--distance-threshold",
+        type=float,
+        default=0.05,
+        help="point-to-circle inlier threshold in the dataset's length unit",
+    )
+    consensus.add_argument(
+        "--min-triangle-quality",
+        type=float,
+        default=DEFAULT_MIN_TRIANGLE_QUALITY,
+        help=(
+            "reject a sampled triplet when ||e01 x e02|| / longest_edge^2 "
+            "is below this value"
+        ),
+    )
+    consensus.add_argument(
+        "--max-sampling-attempts",
+        type=int,
+        default=1000,
+        help="maximum total draws used to obtain all valid hypotheses",
+    )
+    consensus.add_argument(
+        "--sac-seed",
+        type=int,
+        default=20261017,
+        help="random seed for RANSAC/MemorySAC triplet draws",
+    )
+    consensus.add_argument(
+        "--update-rate",
+        type=float,
+        default=0.001,
+        help="MemorySAC score-update rate",
+    )
+    consensus.add_argument(
+        "--checkpoint",
+        default="net.pth",
+        help="MemorySAC network checkpoint",
+    )
+    return parser
+
+
 def load_dataset(path, *, start=0, limit=None, samples_per_circle=None):
     """Load an NPZ file and optionally select a contiguous instance range."""
     if start < 0:
@@ -111,13 +163,6 @@ def build_parser():
         default="ppc",
         help="calibration method (case-insensitive)",
     )
-    parser.add_argument(
-        "--sac",
-        type=_casefold_choice,
-        choices=("none", "ransac", "memorysac"),
-        default="none",
-        help="inlier selector: None, RANSAC, or MemorySAC (case-insensitive)",
-    )
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument(
         "--limit", type=int, default=None, help="run only this many instances"
@@ -129,47 +174,7 @@ def build_parser():
         help="override/inject per-trajectory frame count for a legacy dataset",
     )
 
-    consensus = parser.add_argument_group("RANSAC / MemorySAC")
-    consensus.add_argument("--num-iterations", type=int, default=10)
-    consensus.add_argument(
-        "--distance-threshold",
-        type=float,
-        default=0.05,
-        help="point-to-circle inlier threshold in the dataset's length unit",
-    )
-    consensus.add_argument(
-        "--min-triangle-quality",
-        type=float,
-        default=DEFAULT_MIN_TRIANGLE_QUALITY,
-        help=(
-            "reject a sampled triplet when ||e01 x e02|| / longest_edge^2 "
-            "is below this value"
-        ),
-    )
-    consensus.add_argument(
-        "--max-sampling-attempts",
-        type=int,
-        default=1000,
-        help="maximum total draws used to obtain all valid hypotheses",
-    )
-    consensus.add_argument(
-        "--sac-seed",
-        type=int,
-        default=20261017,
-        help="random seed for RANSAC/MemorySAC triplet draws",
-    )
-    consensus.add_argument(
-        "--update-rate",
-        type=float,
-        default=0.001,
-        help="MemorySAC score-update rate",
-    )
-    consensus.add_argument(
-        "--checkpoint",
-        default="net.pth",
-        help="MemorySAC network checkpoint",
-    )
-    return parser
+    return add_sac_arguments(parser)
 
 
 def main(argv=None):

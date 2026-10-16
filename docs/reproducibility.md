@@ -62,6 +62,7 @@ python simulation.py \
 
 python evaluate_corrected.py \
   --dataset outputs/clean_seed20261015.npz \
+  --sac None \
   --json outputs/clean_metrics.json
 ```
 
@@ -101,6 +102,7 @@ python simulation.py \
 
 python evaluate_corrected.py \
   --dataset outputs/noise_1mm_seed20261015.npz \
+  --sac None \
   --json outputs/noise_1mm_metrics.json
 ```
 
@@ -182,6 +184,13 @@ python PerpAdapt.py \
 将 `--sac RANSAC` 改成 `--sac MemorySAC` 即可选择 MemorySAC；改成
 `--sac None` 则跳过内点筛选。完整参数和三个方法的组合示例见
 [运行命令.md](运行命令.md)。
+
+若要让 PPC、Lee(4)、Lee(6) 在一次评价中全部采用同一种内点筛选方法，可直接给
+评价脚本传参：
+
+```bash
+python evaluate_corrected.py --dataset outputs/clean_seed20261015.npz --sac RANSAC
+```
 
 ## 9. 回归测试
 

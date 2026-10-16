@@ -21,6 +21,10 @@ python simulation.py --output outputs/clean_seed20261015.npz --instances 1000 --
 python evaluate_corrected.py --dataset outputs/clean_seed20261015.npz
 ```
 
+To apply the same selector to PPC, Lee(4), and Lee(6) in one comparison, pass
+`--sac None`, `--sac RANSAC`, or `--sac MemorySAC` to
+`evaluate_corrected.py`.
+
 For the complete clean/noisy commands, data schema, metric definitions, and
 reference results, see [docs/reproducibility.md](docs/reproducibility.md).
 
