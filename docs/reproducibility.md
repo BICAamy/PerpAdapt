@@ -24,6 +24,8 @@
    就是弧度，不再转换。
 7. RANSAC 和 MemorySAC 的三点最小模型增加无量纲近似共线判定。退化三点会被
    丢弃并重抽，不计入有效迭代次数；圆心改为三点所在平面内的解析外心。
+8. 数据生成器支持无噪声、仅高斯噪声、仅结构化离群点，以及高斯噪声与结构化
+   离群点并存四种模式。结构化离群点是一段连续帧共享同一三维偏移向量。
 
 ## 2. 六条轨迹与三种方法
 
@@ -58,7 +60,7 @@ python simulation.py \
   --instances 1000 \
   --samples-per-circle 100 \
   --seed 20261015 \
-  --noise-std 0
+  --noise-mode none
 
 python evaluate_corrected.py \
   --dataset outputs/clean_seed20261015.npz \
@@ -97,6 +99,7 @@ python simulation.py \
   --instances 1000 \
   --samples-per-circle 100 \
   --seed 20261015 \
+  --noise-mode gaussian \
   --noise-std 0.001 \
   --noise-seed 20261016
 
@@ -121,13 +124,53 @@ python evaluate_corrected.py \
 
 ```bash
 # 0.1 mm
-python simulation.py --output outputs/noise_0p1mm.npz --instances 1000 --seed 20261015 --noise-std 0.0001 --noise-seed 20261016
+python simulation.py --output outputs/noise_0p1mm.npz --instances 1000 --seed 20261015 --noise-mode gaussian --noise-std 0.0001 --noise-seed 20261016
 
 # 5 mm
-python simulation.py --output outputs/noise_5mm.npz --instances 1000 --seed 20261015 --noise-std 0.005 --noise-seed 20261016
+python simulation.py --output outputs/noise_5mm.npz --instances 1000 --seed 20261015 --noise-mode gaussian --noise-std 0.005 --noise-seed 20261016
 ```
 
-## 6. 数据格式
+## 6. 生成结构化离群点
+
+结构化离群点以“连续异常片段”生成。对于每一条轨迹，程序随机选择一个起始帧，
+取连续若干帧（允许从末尾环绕到开头），并给这段帧叠加同一个固定三维偏移向量。
+不同轨迹的起点和偏移方向彼此独立。
+
+仅加入结构化离群点：
+
+```bash
+python simulation.py \
+  --output outputs/structured_10pct_30mm.npz \
+  --instances 1000 \
+  --samples-per-circle 100 \
+  --seed 20261015 \
+  --noise-mode structured \
+  --outlier-fraction 0.10 \
+  --outlier-offset 0.03 \
+  --outlier-seed 20261017
+```
+
+同时加入1 mm高斯噪声和10%连续结构化离群点：
+
+```bash
+python simulation.py \
+  --output outputs/gaussian_1mm_structured_10pct_30mm.npz \
+  --instances 1000 \
+  --samples-per-circle 100 \
+  --seed 20261015 \
+  --noise-mode both \
+  --noise-std 0.001 \
+  --noise-seed 20261016 \
+  --outlier-fraction 0.10 \
+  --outlier-offset 0.03 \
+  --outlier-seed 20261017
+```
+
+在 `N=100` 时，`--outlier-fraction 0.10` 表示每条轨迹10帧异常；
+`--outlier-offset 0.03` 表示该异常片段整体偏移30 mm。高斯噪声与结构化偏移都只
+修改位置 `p_i`，不会修改四元数、真实 `t` 或真实枢轴点。
+
+## 7. 数据格式
 
 生成文件保持原项目的主要字段，并增加真值与元数据：
 
@@ -140,14 +183,24 @@ python simulation.py --output outputs/noise_5mm.npz --instances 1000 --seed 2026
 | `t` | `(M, 3)` | 待标定的、传感器坐标系下固定偏移真值 |
 | `cc` | `(M, 3)` | 世界坐标系下第 1 个 C-arm 枢轴点真值 `c_c,0` |
 | `cc_all` | `(M, 3, 3)` | 三个 alpha 基准角对应的枢轴点真值 |
+| `alpha_outlier_mask` / `beta_outlier_mask` | `(M, 3N)` | 与位置逐帧对齐的结构化离群点真值掩码 |
+| `alpha_outlier_offsets` / `beta_outlier_offsets` | `(M, 3, 3)` | 每个实例、每条轨迹所使用的三维偏移向量 |
+| `alpha_outlier_starts` / `beta_outlier_starts` | `(M, 3)` | 每条异常片段在对应轨迹内的起始帧；未使用时为 `-1` |
 | `samples_per_circle` | 标量 | 每条轨迹帧数 `N` |
 | `alpha_base_deg` / `beta_base_deg` | `(3,)` | 固定基准角，单位为度 |
-| `noise_std` | 标量 | 平移噪声标准差，单位为米 |
+| `noise_mode` | 标量字符串 | `none`、`gaussian`、`structured` 或 `both` |
+| `noise_std` | 标量 | 实际施加的高斯平移噪声标准差，单位为米 |
+| `outlier_fraction` | 标量 | 每条轨迹实际施加结构化离群点的比例 |
+| `outlier_offset` | 标量 | 结构化异常片段的固定偏移幅值，单位为米 |
+| `outlier_count_per_circle` | 标量 | 每条轨迹的结构化离群帧数 |
 
 `M=1000, N=100` 时，`alpha_R` 的形状是 `(1000,300,4)`；其中 300 是
 三条轨迹各 100 帧，并不表示一条 300 帧的轨迹。
 
-## 7. 指标定义
+新生成文件的 `format_version` 为 `perpadapt-sim-v3`。原有姿态和真值字段名称、形状
+保持不变。
+
+## 8. 指标定义
 
 对第 `k` 个实例，真实值为 `t_k=(t_kx,t_ky,t_kz)`，估计值为 `t_hat_k`：
 
@@ -161,7 +214,7 @@ c_c,0 error     = mean over k of ||c_hat_c,0,k - c_c,0,k||_2
 `R^2` 分别对 x/y/z 三个输出计算后做等权平均。无噪声结果达到机器精度时，
 `R^2` 显示为 1。
 
-## 8. RANSAC / MemorySAC 的三点退化保护
+## 9. RANSAC / MemorySAC 的三点退化保护
 
 两种共识方法使用同一个三点质量：
 
@@ -192,11 +245,13 @@ python PerpAdapt.py \
 python evaluate_corrected.py --dataset outputs/clean_seed20261015.npz --sac RANSAC
 ```
 
-## 9. 回归测试
+## 10. 回归测试
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖：无噪声机器精度、固定角单位、仅平移加噪且真值不变、不经过世界原点的
-两条旋转轴公共垂线、近似共线三点拒绝与重抽，以及命令行 SAC 选项。
+测试覆盖：无噪声机器精度、固定角单位、旧高斯噪声结果兼容、连续结构化异常片段、
+高斯噪声与结构化偏移叠加、仅位置受扰动、不经过世界原点的两条旋转轴公共垂线、
+近似共线三点拒绝与重抽，以及命令行 SAC 选项。
+

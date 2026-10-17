@@ -41,13 +41,36 @@ def _format(value):
     return f"{value:.12e}"
 
 
+def dataset_noise_metadata(dataset):
+    noise_std = float(np.asarray(dataset.get("noise_std", 0.0)).item())
+    if "noise_mode" in dataset:
+        noise_mode = str(np.asarray(dataset["noise_mode"]).item())
+    else:
+        noise_mode = "gaussian" if noise_std > 0.0 else "none"
+    return {
+        "noise_mode": noise_mode,
+        "noise_std": noise_std,
+        "outlier_fraction": float(
+            np.asarray(dataset.get("outlier_fraction", 0.0)).item()
+        ),
+        "outlier_offset": float(
+            np.asarray(dataset.get("outlier_offset", 0.0)).item()
+        ),
+        "outlier_count_per_circle": int(
+            np.asarray(dataset.get("outlier_count_per_circle", 0)).item()
+        ),
+    }
+
+
 def print_results(dataset, results, sac_name="none"):
     instance_count = len(dataset["t"])
     samples = int(np.asarray(dataset.get("samples_per_circle", 100)).item())
-    noise_std = float(np.asarray(dataset.get("noise_std", np.nan)).item())
+    noise = dataset_noise_metadata(dataset)
+    print(f"instances={instance_count}, samples_per_circle={samples}, sac={sac_name}")
     print(
-        f"instances={instance_count}, samples_per_circle={samples}, "
-        f"noise_std={noise_std:g} m, sac={sac_name}"
+        f"noise_mode={noise['noise_mode']}, noise_std={noise['noise_std']:g} m, "
+        f"structured={noise['outlier_count_per_circle']}/{samples} frames, "
+        f"outlier_offset={noise['outlier_offset']:g} m"
     )
     columns = [
         ("method", 10),
@@ -114,6 +137,7 @@ def main(argv=None):
     print_results(dataset, results, sac_name=args.sac)
 
     if args.json_path:
+        noise = dataset_noise_metadata(dataset)
         serializable = []
         for result in results:
             serializable.append(
@@ -121,6 +145,7 @@ def main(argv=None):
                     "method": result["method"],
                     "sac": args.sac,
                     "sac_seed": args.sac_seed if args.sac != "none" else None,
+                    **noise,
                     "cc_error_mean": result.get("cc_error_mean"),
                     "t_component_mae": result["mae"],
                     "t_component_mse": result["mse"],
@@ -139,3 +164,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

@@ -17,9 +17,13 @@ through the world-coordinate origin.
 
 ```bash
 python -m pip install -r requirements.txt
-python simulation.py --output outputs/clean_seed20261015.npz --instances 1000 --samples-per-circle 100 --seed 20261015 --noise-std 0
+python simulation.py --output outputs/clean_seed20261015.npz --instances 1000 --samples-per-circle 100 --seed 20261015 --noise-mode none
 python evaluate_corrected.py --dataset outputs/clean_seed20261015.npz
 ```
+
+The simulator supports `--noise-mode none`, `gaussian`, `structured`, and
+`both`. Structured outliers are contiguous frame blocks that share a fixed
+3-D translation offset; their fraction, magnitude, and seed are configurable.
 
 To apply the same selector to PPC, Lee(4), and Lee(6) in one comparison, pass
 `--sac None`, `--sac RANSAC`, or `--sac MemorySAC` to
@@ -46,3 +50,4 @@ Run the regression tests with:
 ```bash
 python -m unittest discover -s tests -v
 ```
+
